@@ -1,0 +1,67 @@
+<html>
+
+  <head>
+  
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="Content-Script-Type" content="text/javascript">
+    <!-- Use compatibility mode in IE to allow for newer features -->
+    <meta http-equiv="x-ua-compatible" content="IE=edge">
+	
+	<script type="text/javascript">
+		function elements() {
+			return  document.getElementById('form').elements;
+		}
+		function init() {
+			var textarea = elements()["tsv"]
+			textarea.addEventListener("keydown", function(e) {
+				if(e.keyCode === 9) { // tab was pressed
+					// get caret position/selection
+					var start = this.selectionStart;
+					var end = this.selectionEnd;
+
+					var value = this.value;
+					
+					// set textarea value to: text before caret + tab + text after caret
+					this.value = (value.substring(0, start)
+								+ "\t"
+								+ value.substring(end));
+
+					// put caret at right position again (add one for the tab)
+					this.selectionStart = this.selectionEnd = start + 1;
+
+					// prevent the focus lose
+					e.preventDefault();
+				}
+			});
+			
+			sketchup.onload()
+		
+		}
+		function render() {
+			var es = elements()
+
+			sketchup.render(es['tsv'].value, es['height'].value, es['margins'].value/*, es['hebrew'].checked*/)
+		}
+		function set_values(tsv, height, margins/*, is_hebrew*/) {
+			var es = elements()
+			es['tsv'].value = tsv;
+			es['height'].value = height;
+			es['margins'].value = margins;
+			//es['hebrew'].checked = (is_hebrew == 'true')
+		}
+	</script>
+
+   </head>
+   <body onload="init()">
+	<form id="form">
+		<div><textarea dir="auto" name="tsv"></textarea></div>
+		<div>
+			Height: <input type="text" name="height" value="12mm"></input>
+			Margin: <input type="text" name="margins" value="3mm"></input>
+			<!-- Hebrew: <input type="checkbox" name="hebrew"></input> -->
+		</div>
+	</form>
+		<button onclick="render()">Render</button>
+		<button onclick="window.close()">Close</button>
+   </body>
+ </html>
