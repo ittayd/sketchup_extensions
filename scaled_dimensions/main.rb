@@ -189,7 +189,7 @@ module Ittay
 	end
 	
 	def model_transformations(instance)
-		model_path_transformations(instance).tputs('ret').map(&:transformation)
+		model_path_transformations(instance).map(&:transformation)
 	end
 	
 	def parent_transformation(dim)
@@ -277,11 +277,20 @@ module Ittay
 			ent.parent.instances.flat_map do |inst|
 				mpt = model_path_transformations(inst)
 				mpt.map do |pt| 
-					if ent.position.transform(pt.transformation) == pos
-						pt.path
+					case ent
+					when Sketchup::Vertex
+						if ent.position.transform(pt.transformation) == pos
+							pt.path
+						end
+					when Sketchup::Edge
+						if pos.distance_to_line(ent.line.map{|x| x.transform(pt.transformation)}) == 0
+							pt.path
+						end
+					else
+						nil
 					end
 				end 
-			end.compact.uniq.tputs('instance_paths')
+			end.compact.uniq
 		end
 		
 		def partial_paths(paths)
@@ -298,8 +307,8 @@ module Ittay
 				only_dims.map do |dim|
 				
 					
-					start_instances = instance_paths(dim.start[0], dim.start[1].transform(parent_transformation(dim))).tputs("start inst")
-					end_instances = instance_paths(dim.end[0], dim.end[1].transform(parent_transformation(dim))).tputs("end inst")
+					start_instances = instance_paths(dim.start[0], dim.start[1].transform(parent_transformation(dim)))
+					end_instances = instance_paths(dim.end[0], dim.end[1].transform(parent_transformation(dim)))
 					
 					common_paths = start_instances.product(end_instances).map do |start_inst, end_inst| 
 						start_inst & end_inst
@@ -315,7 +324,7 @@ module Ittay
 								uniq + [path]
 							end
 						end
-					end.tputs('common_uniq')
+					end
 					
 					
 					path = case common_uniq.size 
@@ -329,7 +338,7 @@ module Ittay
 							puts 'Too many common'
 							nil
 					end
-					[dim, Sketchup::InstancePath.new(path)].tap {|ret| ret[1].to_a.tputs('path')}
+					[dim, path.nil? ? nil : Sketchup::InstancePath.new(path)]
 				end
 			end
 				
@@ -579,26 +588,33 @@ module Ittay
 	
 	
 	def self.scale_dim(dim, scaling, debug = @debug)	
-		vec = dim.start[1].vector_to(dim.end[1])
-		normalized = vec.transform(parent_transformation(dim))
-		transformed = normalized.transform(scaling)
-		scaled = transformed.length
-		def format_trans(name, trans)
-			"#{trans.is_a?(Geom::Transformation) ? trans.to_matrix('name=') : trans}"
+	def format_trans(name, trans)
+			"#{trans.is_a?(Geom::Transformation) ? trans.to_matrix("#{name}=") : trans}"
 		end
-		def format_vec(name, vec)
-			"#{name}=(#{vec.x.to_l.to_s}, #{vec.y.to_l.to_s}, #{vec.z.to_l.to_s})"
+		def format_point(point)
+			"(#{point.x.to_l.to_s}, #{point.y.to_l.to_s}, #{point.z.to_l.to_s})"
 		end
-		puts "#{dim}:\n#{format_vec('orig', vec)}\n#{format_trans('parent_transformation', parent_transformation(dim))}\n#{format_vec('normalized', normalized)}\n#{format_vec('transformed', transformed)}\n#{format_trans('scaling', scaling)}\n#{scaled}"  if debug
+		def format_points(name, points)
+			"#{name}=[start=#{format_point(points[0])}, end=#{format_point(points[1])}, offset=#{format_point(points[2])}]"
+		end
+		def transform(arr, transformation)
+			arr.map{|e| e.transform(transformation)}
+		end
+		points = [dim.start[1], dim.end[1], dim.offset_vector]
+		normalized = transform(points, parent_transformation(dim))
+		transformed = transform(normalized, scaling).tputs('transformed2')
+		scaled = transformed[0].distance_to_line([transformed[1], transformed[2]]).to_f.to_l #for some reason, distance_to_line returns in inches
+		
+		puts "#{dim}:\n#{format_points('orig', points)}\n#{format_trans('parent_transformation', parent_transformation(dim))}\n#{format_points('normalized', normalized)}\n#{format_points('transformed', transformed)}\n#{format_trans('scaling', scaling)}\n#{scaled}"  if debug
 		scaled
 	end
 	
-	def self.update_scaled_dims(dims)
+	def self.update_scaled_dims(dims = nil)
 		model = Sketchup.active_model
-		
-
+		dims ||= get_scaled_dims(model.selection.empty? ? nil : model.selection)
+ 
 		scaled = in_global_context(model) do 
-			dims.map do |dim| 
+			dims.map do |dim|
 				# Sketchup has a bug in which dimensions for scaled groups return text that is different than what actually is displayed. So can't rely on dim.text
 				# current = dim.text
 				# current = dim.get_attribute('scaling', 'text')
@@ -608,7 +624,6 @@ module Ittay
 					Geom::Transformation.scaling(scale_str.to_f)
 				elsif not persistent_id.nil?
 					path = model.instance_path_from_pid_path(persistent_id)
-					puts "trans=#{path.transformation.to_matrix}, a=#{path.to_a}"
 					path.transformation.inverse
 				else	
 					raise 'no scale or persistent id attributes'
@@ -643,10 +658,10 @@ module Ittay
 		model.selection.add()
 	end
 	
-	def self.get_scaled_dims
+	def self.get_scaled_dims(ents = nil)
 		model = Sketchup.active_model
 	  
-		filter(model.entities, true).select do |dim|
+		filter(ents || model.entities, true).select do |dim|
 			dim.attribute_dictionary('scaling')
 		end
 	end
