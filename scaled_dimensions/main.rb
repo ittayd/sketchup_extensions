@@ -174,16 +174,22 @@ module Ittay
 			
 	end
 	
-	def model_transformations(instance)
+	PathTransformation ||= Struct.new(:path, :transformation)
+	
+	def model_path_transformations(instance)
 		# doesn't account for cases when in an open group. use in_global_context to eliminate that
 		if instance.parent.is_a?(Sketchup::DefinitionList) || instance.parent.is_a?(Sketchup::Model)
-			return [instance.transformation]
+			return [PathTransformation.new([instance], instance.transformation)]
 		end
 		instance.parent.instances.flat_map do |i| 
-			model_transformations(i)
-		end.map do |ct| 
-			ct  * instance.transformation 
+			model_path_transformations(i)
+		end.map do |pt| 
+			PathTransformation.new(pt.path + [instance], pt.transformation  * instance.transformation)
 		end.uniq
+	end
+	
+	def model_transformations(instance)
+		model_path_transformations(instance).tputs('ret').map(&:transformation)
 	end
 	
 	def parent_transformation(dim)
@@ -226,54 +232,104 @@ module Ittay
 		end
 		
 		def selected_dims 
-			@selected_dims_and_ents.map{|dim, ent| dim}
+			@selected_dims_and_paths.map{|dim, ent| dim}
 		end
 		
 		def selected_dims?
-			!@selected_dims_and_ents.empty?
+			!@selected_dims_and_paths.empty?
+		end
+		
+		# def instances(ent, pos, ancestors = nil) 
+			# if ent.tputs("ent").nil?
+				# return []
+			# end
+			
+			# if !ent.parent.is_a?(Sketchup::ComponentDefinition)
+				# return []
+			# end
+			
+			# ancestors ||= ent.parent.instances
+			# ancestors.tputs("parent instances")
+
+			# ancestors.find_all do |inst| # find any instances of the parent that contains the entity
+				# model_transformations(inst).any? do |t| # the instance can appear in several parents (who are component definitions)
+					# puts 
+					# ent.position.transform(t) == pos
+				# end
+			# end.tputs('found').flat_map do |inst| # for each instance, recursively find the instances that contain it to create a path
+				# recursion = if inst.parent.is_a?(Sketchup::ComponentDefinition)
+					 # instances(ent, pos, inst.parent.instances)
+				# else
+					# []
+				# end.tputs('recursion')
+				# recursion << inst
+			# end.tputs('flat_map')
+		# end
+		
+		def instance_paths(ent, pos)
+			if ent.nil?
+				return []
+			end
+			if !ent.parent.is_a?(Sketchup::ComponentDefinition)
+				return []
+			end
+			
+			ent.parent.instances.flat_map do |inst|
+				mpt = model_path_transformations(inst)
+				mpt.map do |pt| 
+					if ent.position.transform(pt.transformation) == pos
+						pt.path
+					end
+				end 
+			end.compact.uniq.tputs('instance_paths')
+		end
+		
+		def partial_paths(paths)
+			paths.flat_map do |path|
+				Array.new(path.length) { |i| path[0..i] }
+			end.uniq
 		end
 		
 		def activate 
 			selection = Sketchup.active_model.selection
 			@pre_selected = selection.map(&:itself)
 			only_dims = filter(selection)
-			@selected_dims_and_ents = in_global_context(selection.model) do 
+			@selected_dims_and_paths = in_global_context(selection.model) do 
 				only_dims.map do |dim|
 				
-					def instances(ent, pos, ancestors = nil) 
-						if ent.nil?
-							return []
-						end
-						
-						if !ent.parent.is_a?(Sketchup::ComponentDefinition)
-							return []
-						end
-						
-						ancestors ||= ent.parent.instances
-
-						ancestors.find_all do |inst| # find any instances of the parent that contains the entity
-							model_transformations(inst).any? do |t| # the instance can appear in several parents (who are component definitions)
-								ent.position.transform(t) == pos
+					
+					start_instances = instance_paths(dim.start[0], dim.start[1].transform(parent_transformation(dim))).tputs("start inst")
+					end_instances = instance_paths(dim.end[0], dim.end[1].transform(parent_transformation(dim))).tputs("end inst")
+					
+					common_paths = start_instances.product(end_instances).map do |start_inst, end_inst| 
+						start_inst & end_inst
+					end.sort_by(&:length).reverse
+					
+					common_uniq = common_paths.inject([]) do |uniq, path|
+						if uniq.empty?
+							[path]
+						else
+							if uniq.last & path == path
+								uniq
+							else
+								uniq + [path]
 							end
-						end.flat_map do |inst| # for each instance, recursively find the instances that contain it to create a path
-							instances(ent, pos, inst.parent.instances) << inst
 						end
-					end
-					start_instances = instances(dim.start[0], dim.start[1].transform(parent_transformation(dim)))
-					end_instances = instances(dim.end[0], dim.end[1].transform(parent_transformation(dim)))
-					common_instances = (start_instances & end_instances)
-					ent = case common_instances.size 
+					end.tputs('common_uniq')
+					
+					
+					path = case common_uniq.size 
 						when 0 
 							puts 'Nothing common'
 							nil
 						when 1
 							puts 'One common'
-							common_instances[0]
+							common_uniq[0]
 						else 
-							puts 'Do many common'
+							puts 'Too many common'
 							nil
 					end
-					[dim, ent]
+					[dim, Sketchup::InstancePath.new(path)].tap {|ret| ret[1].to_a.tputs('path')}
 				end
 			end
 				
@@ -283,7 +339,7 @@ module Ittay
 				return
 			end
 
-			unassociated = @selected_dims_and_ents.count{|dim, ent| ent.nil?} 
+			unassociated = @selected_dims_and_paths.count{|dim, ent| ent.nil?} 
 			
 			# if !no_ents.empty? && !with_ents.empty?
 				
@@ -372,24 +428,26 @@ module Ittay
 			# TODO? add undo with model observer
 			model = view.model
 			model.start_operation('Scale Dimensions', true)
-			@selected_dims_and_ents.each do |dim, scale| 
+			@selected_dims_and_paths.each do |dim, scale| 
 				scale = override unless override.nil?
 				dim.delete_attribute('scaling')
 				# dim.set_attribute('scaling', 'parent_scale', parent_scale(dim).to_a)
 				case scale
 					when Numeric
 						dim.set_attribute('scaling', 'scale', scale)
-					else 
-						if is_supported(scale)
-							dim.set_attribute('scaling', 'persistent_id', scale.persistent_id)
-						end
+					else  # path, Array
+						#if is_supported(scale)
+						# there's a but in sketchup where InstancePath#persistent_id_path would not return the id of the leaf
+						persistent_id_path = scale.to_a.map(&:persistent_id).join('.')
+						dim.set_attribute('scaling', 'persistent_id', persistent_id_path)
+						#end
 
 				end
 				Ittay::ScaledDimensions.start_updating(dim)
 			end
 			model.commit_operation
 			# Ittay::ScaledDimensions.init_timer
-			Ittay::ScaledDimensions.update_scaled_dims(@selected_dims_and_ents.map{|dim, scale| dim})
+			Ittay::ScaledDimensions.update_scaled_dims(selected_dims)
 			
 			selection = model.selection
 			selection.clear
@@ -507,8 +565,12 @@ module Ittay
       model.commit_operation
     end
 	
+	def self.scaled_dims 
+		@scaled_dims ||= []
+	end
+	
 	def self.start_updating(dim) 
-		@scaled_dims.add(dim)
+		scaled_dims.push(dim)
 	end 
 	
 	def self.debug=(enable)
@@ -545,8 +607,9 @@ module Ittay
 				scaling = if not scale_str.nil? 
 					Geom::Transformation.scaling(scale_str.to_f)
 				elsif not persistent_id.nil?
-					entity = dim.model.find_entity_by_persistent_id(persistent_id)
-					model_transformations(entity)[0].inverse
+					path = model.instance_path_from_pid_path(persistent_id)
+					puts "trans=#{path.transformation.to_matrix}, a=#{path.to_a}"
+					path.transformation.inverse
 				else	
 					raise 'no scale or persistent id attributes'
 				end
@@ -589,8 +652,8 @@ module Ittay
 	end
 	
 	def self.init_scaled_dims
-		@scaled_dims = get_scaled_dims
-		update_scaled_dims(@scaled_dims)
+		scaled_dims = get_scaled_dims
+		update_scaled_dims(scaled_dims)
 	end
 	
 	def self.stop_timer
@@ -603,11 +666,11 @@ module Ittay
 		begin
 			if model.tools.active_tool_id == 21022
 		
-				@scaled_dims.delete_if do |dim|
+				scaled_dims.delete_if do |dim|
 					dim.deleted? || dim.attribute_dictionary('scaling').nil?
 				end
 
-				self.update_scaled_dims(@scaled_dims)
+				self.update_scaled_dims(scaled_dims)
 			end
 		rescue 
 			stop_timer
